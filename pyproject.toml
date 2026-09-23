@@ -34,3 +34,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jev_diff", "src/jev_web"]
+
+[tool.vercel]
+entrypoint = "api.index:app"
