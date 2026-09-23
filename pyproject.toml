@@ -1,0 +1,22 @@
+[project]
+name = "jev-diff"
+version = "0.1.0"
+description = "Year-over-year diff for GM vehicle order-guide exports, judged with TypeSafe Jev"
+requires-python = ">=3.11"
+dependencies = [
+    "openpyxl>=3.1",
+    "rapidfuzz>=3.0",
+]
+
+[project.optional-dependencies]
+judge = ["typesafe-sdk"]
+
+[project.scripts]
+jev-diff = "jev_diff.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jev_diff"]

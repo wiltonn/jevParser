@@ -1,0 +1,245 @@
+/* jev-diff report stylesheet: src/jev_diff/render/html.py, _CSS, with the :root variable blocks removed (tokens.css declares them). */
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;}
+.wrap{max-width:1180px;margin:0 auto;padding:32px 16px 96px}
+h1{font-size:23px;margin:0 0 4px;letter-spacing:-.01em}
+h2{font-size:15px;margin:32px 0 10px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);font-weight:600}
+.sub{color:var(--muted);font-size:13.5px;margin:0 0 22px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:var(--shadow)}
+.stats{display:flex;flex-wrap:wrap;gap:22px;padding:14px 18px;margin-bottom:18px}
+.stat b{display:block;font-size:19px;font-variant-numeric:tabular-nums}
+.stat span{font-size:11.5px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.05em}
+.tuner{padding:16px 18px;margin-bottom:22px;position:sticky;top:0;z-index:5;
+  backdrop-filter:blur(8px)}
+.trow{display:flex;flex-wrap:wrap;gap:18px;align-items:center}
+.trow+.trow{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+label{font-size:12.5px;color:var(--muted)}
+.ctl{display:flex;align-items:center;gap:8px}
+.ctl output{font-variant-numeric:tabular-nums;font-size:12.5px;min-width:30px;
+  font-family:ui-monospace,monospace}
+input[type=range]{width:106px;accent-color:var(--accent)}
+button{font:inherit;font-size:12.5px;padding:5px 11px;border-radius:7px;
+  border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+button:hover{border-color:var(--accent)}
+button[data-lens].on{background:var(--accent);border-color:var(--accent);color:#fff}
+.bands{display:flex;gap:8px;margin:0 0 14px;flex-wrap:wrap}
+.pill{font-size:12px;padding:4px 11px;border-radius:999px;border:1px solid var(--line);
+  cursor:pointer;background:var(--panel)}
+.pill.on{border-color:currentColor;
+  background:color-mix(in srgb,currentColor 14%,transparent);font-weight:600}
+.pill:not(.on){opacity:.6}
+.pill[data-b=material]{color:var(--material)} .pill[data-b=review]{color:var(--review)}
+.pill[data-b=cosmetic]{color:var(--cosmetic)}
+.ev{padding:13px 16px;margin-bottom:9px;scroll-margin-top:150px}
+.ev header{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;padding:2px 7px;
+  border-radius:5px;border:1px solid currentColor;font-weight:600}
+.tag[data-b=material]{color:var(--material)} .tag[data-b=review]{color:var(--review)}
+.tag[data-b=cosmetic]{color:var(--cosmetic)} .tag[data-b=unjudged]{color:var(--muted)}
+.code{font-family:ui-monospace,monospace;font-weight:600;font-size:13.5px}
+.desc{flex:1;min-width:220px;font-size:14px}
+.where{font-size:11.5px;color:var(--muted)}
+.score{font-family:ui-monospace,monospace;font-size:12.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums}
+.detail{font-size:13px;color:var(--muted);margin-top:7px;line-height:1.55}
+table.matrix{border-collapse:collapse;margin-top:11px;font-size:12px;width:100%}
+table.matrix th{font-weight:600;font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.04em;color:var(--muted);padding:4px 8px;text-align:left;
+  border-bottom:1px solid var(--line)}
+table.matrix td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+table.matrix tr:last-child td{border-bottom:none}
+.cell{font-family:ui-monospace,monospace;white-space:nowrap}
+.arrow{color:var(--muted);padding:0 4px}
+.d{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+.d-content_added{color:var(--added)} .d-content_removed{color:var(--removed)}
+.d-upgraded{color:var(--upgraded)} .d-decontented{color:var(--decontented)}
+.d-package_shift{color:var(--package)} .d-fulfillment_shift{color:var(--package)}
+.d-constraint_only{color:var(--constraint)} .d-unchanged{color:var(--muted);opacity:.5}
+.d-incomparable{color:var(--incomparable)}
+tr.unchanged{opacity:.45} tr.incomparable{background:
+  repeating-linear-gradient(45deg,transparent,transparent 5px,var(--line) 5px,var(--line) 6px)}
+.cond{display:block;font-size:11.5px;margin-top:2px}
+.cond.add{color:var(--added)} .cond.drop{color:var(--removed)}
+.cond.reword{color:var(--constraint)}
+.empty{padding:22px;text-align:center;color:var(--muted);font-size:13.5px}
+.q{display:inline-flex;gap:5px;font-size:11px;color:var(--muted);
+  font-family:ui-monospace,monospace}
+details summary{cursor:pointer;font-size:13px;color:var(--muted);padding:8px 0}
+table.plain{border-collapse:collapse;width:100%;font-size:12.5px}
+table.plain th{text-align:left;font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.05em;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--line)}
+table.plain td{padding:6px 10px;border-bottom:1px solid var(--line)}
+@media(max-width:640px){.wrap{padding:20px 16px 72px}.tuner{position:static}
+  table.matrix{font-size:11px}}
+
+/* jev-diff UI components, extending the design system's bundle.css.
+   Every value is a token; nothing here introduces a colour, an icon or a
+   second affordance for a state the system already expresses. */
+
+/* --- Nav -----------------------------------------------------------------
+   The system already teaches: accent fill = exclusive mode (lens buttons),
+   own-colour tint = subset toggle (band pills), fade = not chosen. Nav must
+   not be a third invention, so it resolves by SHAPE: a bare lowercase word
+   with a rule beneath it, neither a bordered rect nor a capsule.
+   Items are anchors, so the view switcher and the deep links are one
+   mechanism -- middle-click and browser back come free. Never sticky: the
+   tuner already is, and two stacked stickies breaks scroll-margin. */
+.nav{display:flex;gap:18px;flex-wrap:nowrap;overflow-x:auto;margin:0 0 18px;
+  border-bottom:1px solid var(--line)}
+.nav-i{font-size:13px;color:var(--ink);text-decoration:none;white-space:nowrap;
+  padding:0 0 7px;margin-bottom:-1px;border-bottom:2px solid transparent;
+  opacity:var(--opacity-pill-off)}
+.nav-i:hover{opacity:1}
+.nav-i.on{opacity:1;font-weight:600;border-bottom-color:var(--accent)}
+/* Counts are TOTALS, never the filtered number, or the nav flickers on every
+   slider drag. The band pills own the filtered count. */
+.nav-n{color:var(--muted);font-variant-numeric:tabular-nums}
+
+/* The sheet rail: the same affordance at a second scale, so "pick a place"
+   is one thing to learn rather than two. */
+.rail{display:flex;gap:18px;align-items:flex-start}
+.rail>.nav.vert{flex:0 0 190px}
+.rail>.rail-body{flex:1;min-width:0}
+.nav.vert{flex-direction:column;gap:0;overflow:visible;margin:0;
+  border-bottom:none;border-right:1px solid var(--line)}
+.nav.vert .nav-i{padding:5px 12px 5px 0;margin:0 -1px 0 0;
+  border-bottom:none;border-right:2px solid transparent;white-space:normal}
+.nav.vert .nav-i.on{border-right-color:var(--accent)}
+.nav-group{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--muted);font-weight:600;padding:12px 0 4px}
+.nav-group:first-child{padding-top:0}
+
+/* --- FilterBar -----------------------------------------------------------
+   One bar holding the search input AND the selects, so nothing invites a
+   stray second search box elsewhere. Native <select>: a custom dropdown
+   needs a chevron, which is an icon. */
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+  padding:10px 14px;margin-bottom:10px}
+.q-in{flex:1;min-width:200px;font:inherit;font-size:13px;padding:5px 9px;
+  border-radius:var(--radius-button);border:1px solid var(--line);
+  background:var(--panel);color:var(--ink)}
+.bar select{font:inherit;font-size:12.5px;padding:5px 8px;
+  border-radius:var(--radius-button);border:1px solid var(--line);
+  background:var(--panel);color:var(--ink)}
+.q-in:hover,.bar select:hover{border-color:var(--accent)}
+.chk{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;
+  color:var(--muted);cursor:pointer}
+.chk input{accent-color:var(--accent)}
+
+/* --- Crumb ---------------------------------------------------------------
+   The antidote to two filtering systems: it always says what has been hidden
+   and by what. The word "clear", never an icon. */
+.crumb{font-size:11.5px;color:var(--muted);margin:0 0 12px;padding:0 2px}
+.crumb b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.crumb a{color:var(--muted);text-decoration:underline;cursor:pointer}
+.crumb a:hover{color:var(--ink)}
+
+/* A pill with no band is neutral: the shape is reusable, the band COLOURS
+   are what is reserved. Disposition chips must not read as severity. */
+.pill[data-b=""],.pill:not([data-b]){color:var(--ink)}
+
+/* --- SheetTable ----------------------------------------------------------
+   Every row of a worksheet, not only the changed ones. Not a TrimMatrix
+   variant: different columns, different density, 1,370 rows. Demotion is the
+   system's existing rule -- unchanged rows fade, incomparable keeps its
+   hatch -- so no new per-row marker is invented. */
+table.sheet{border-collapse:collapse;width:100%;font-size:12px;margin-top:4px;
+  table-layout:fixed}
+table.sheet td{overflow-wrap:anywhere}
+/* How many conditions hang off this cell. A count, not an icon; the text is
+   in the tooltip and on the event card. */
+.condn{font-size:10px;color:var(--muted);vertical-align:super;margin-left:2px}
+table.sheet th{font-weight:600;font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.04em;color:var(--muted);padding:4px 8px;text-align:left;
+  border-bottom:1px solid var(--line);position:sticky;top:0;
+  background:var(--panel);z-index:1}
+table.sheet td{padding:5px 8px;border-bottom:1px solid var(--line);
+  vertical-align:top}
+table.sheet tr:last-child td{border-bottom:none}
+table.sheet tr.unchanged{opacity:var(--opacity-unchanged-row)}
+table.sheet tr.hit{background:color-mix(in srgb,var(--accent) 7%,transparent)}
+/* The description carries the meaning and must not be squeezed by the trim
+   columns, which hold two or three characters plus their conditions. */
+table.sheet th:first-child,table.sheet td:first-child{width:54px}
+table.sheet th:nth-child(2),table.sheet td:nth-child(2){width:30%}
+table.sheet th:last-child,table.sheet td:last-child{width:64px;text-align:right}
+.rowcode{font-family:var(--font-mono);font-weight:600;white-space:nowrap}
+.rowlink{color:var(--muted);text-decoration:none;font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.04em}
+.rowlink:hover{color:var(--accent)}
+/* A section banner spans the row, so the last-child right-align must not
+   catch it. */
+.sec{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--muted);font-weight:600;padding-top:14px;text-align:left}
+table.sheet td.sec{width:auto}
+
+/* --- KeyedTable / GridTable / AxisLineup ---------------------------------
+   Side-by-side earns its width only where there is no single comparison to
+   arrow: values rather than tokens, or an axis that itself moved. */
+table.keyed,table.grid,table.lineup{border-collapse:collapse;width:100%;
+  font-size:12.5px;margin-top:4px}
+table.keyed th,table.grid th,table.lineup th{font-weight:600;font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+  padding:4px 8px;text-align:left;border-bottom:1px solid var(--line)}
+table.keyed td,table.grid td,table.lineup td{padding:5px 8px;
+  border-bottom:1px solid var(--line);vertical-align:top}
+table.keyed tr.unchanged,table.grid tr.unchanged{opacity:var(--opacity-unchanged-row)}
+.val{font-family:var(--font-mono);white-space:nowrap}
+.val.moved{color:var(--decontented)}
+.yr{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--muted);font-weight:600;margin:14px 0 2px}
+
+/* --- pairing view --------------------------------------------------------
+   Disposition groups. Deliberately no band colour: these are facts about
+   pairing, not judgments about severity. */
+.grp{margin:0 0 6px}
+.grp-h{font-size:11.5px;color:var(--muted);margin:16px 0 6px}
+.unp{padding:9px 14px;margin-bottom:6px;display:flex;gap:10px;
+  align-items:baseline;flex-wrap:wrap;scroll-margin-top:var(--scroll-margin)}
+.unp .desc{font-size:13px}
+.jrow{scroll-margin-top:var(--scroll-margin)}
+
+/* --- deep-linked item ----------------------------------------------------
+   A linked entity is ALWAYS rendered, even when the filters would hide it,
+   or every link to a cosmetic change lands on nothing. */
+.linked{border-color:var(--accent)}
+
+@media(max-width:640px){
+  /* The tuner stops being sticky here, so a 150px scroll-margin becomes
+     150px of dead space above every anchored card. */
+  .ev,.unp,.jrow{scroll-margin-top:12px}
+  .nav{gap:14px}
+  .rail{display:block}
+  .rail>.nav.vert{flex:none;flex-direction:row;overflow-x:auto;
+    border-right:none;border-bottom:1px solid var(--line);margin-bottom:14px}
+  .nav.vert .nav-i{padding:0 0 7px;margin:0 0 -1px 0;border-right:none;
+    border-bottom:2px solid transparent;white-space:nowrap}
+  .nav.vert .nav-i.on{border-right-color:transparent;
+    border-bottom-color:var(--accent)}
+  .nav-group{display:none}
+  .bar{gap:8px}
+  .q-in{flex:1 0 100%}
+  .bar select{flex:1 1 calc(50% - 4px);min-width:0}
+  /* The crumb is the one piece of state still needed once the pills scroll
+     away, so it stays pinned even though the tuner does not. */
+  .crumb{position:sticky;top:0;z-index:var(--layer-tuner);
+    background:var(--bg);padding:6px 2px;margin:0 0 8px}
+  /* SheetTable cannot fit: 5 trim columns plus code and description fits at
+     no font size. It transposes to one card per row instead of scrolling
+     sideways with no affordance to hint at it. */
+  table.sheet thead{display:none}
+  table.sheet,table.sheet tbody,table.sheet tr,table.sheet td{display:block;width:100%}
+  table.sheet tr{border:1px solid var(--line);border-radius:var(--radius-card);
+    padding:10px 12px;margin-bottom:9px;background:var(--panel)}
+  table.sheet td{border:none;padding:2px 0}
+  table.sheet td[data-l]:before{content:attr(data-l) " ";
+    font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;
+    color:var(--muted);font-weight:600}
+  /* Two rare sheets; accept the scroll rather than contort the system. */
+  table.grid{display:block;overflow-x:auto;white-space:nowrap}
+}

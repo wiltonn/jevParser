@@ -1,0 +1,6 @@
+artifact: https://claude.ai/artifact/W4cDKKHUX8rUQUAsi6bfem
+version:  4
+files:    project/tokens.json, project/components/bundle.css, project/components/bundle.js
+note:     Vendored verbatim. The report inlines these bytes; tests/test_design.py fails
+          if the emitted report and these files disagree. Re-sync by reading the artifact
+          and replacing these three files plus this stamp.
