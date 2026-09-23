@@ -1,0 +1,15 @@
+# Vercel deploy: base + web + judge dependencies from pyproject.toml.
+openpyxl>=3.1
+rapidfuzz>=3.0
+pydantic>=2.6
+fastapi>=0.121
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+alembic>=1.13
+pydantic-settings>=2.3
+python-multipart>=0.0.9
+cryptography>=42
+pdfplumber>=0.11
+typesafe-sdk
+# Postgres driver for JEV_DATABASE_URL=postgresql://...
+psycopg2-binary>=2.9
