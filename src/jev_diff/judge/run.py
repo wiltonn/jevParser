@@ -12,16 +12,21 @@ makes re-ranking free.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from rapidfuzz import fuzz
 
 from ..align.pairing import BookAlignment, Unpaired
 from ..classify import ChangeEvent
-from .cache import JudgmentCache
-from .client import Reply, Request, ask_many
+from ..rules.context import DEFAULT_CONTEXT, PromptContext
+from ..rules.default_gm import DEFAULT_GM
+from ..rules.model import RuleSet
+from .cache import JudgmentStore
+from .client import ApiConfig, Reply, Request, ask_many
 from .questions import (
     CONFIDENCE_FLOOR,
+    QuestionSet,
+    build_questions,
     constraint_request,
     materiality_request,
     pairing_request,
@@ -30,7 +35,14 @@ from .questions import (
 )
 
 #: Below this description similarity two rows are not even worth asking about.
-SIMILARITY_FLOOR = 50.0
+SIMILARITY_FLOOR = DEFAULT_GM.judge.similarity_floor
+
+#: ``progress(stage, done, total)`` -- called as judgments land.
+Progress = Callable[[str, int, int], None]
+
+
+class Cancelled(RuntimeError):
+    """The caller asked the run to stop.  Answers received so far are cached."""
 
 
 @dataclass(slots=True)
@@ -43,13 +55,18 @@ class Lens:
     confidence_floor: float = CONFIDENCE_FLOOR
 
 
-DEFAULT_LENSES = {
-    "ordering": Lens("ordering", {"order_risk": 1.0, "content_churn": 0.0}),
-    "content": Lens("content", {"order_risk": 0.2, "content_churn": 1.0}),
-}
+def lenses_from(rules: RuleSet | None = None) -> dict[str, Lens]:
+    rules = rules or DEFAULT_GM
+    return {
+        name: Lens(name, dict(lens.weights), dict(lens.bands), lens.confidence_floor)
+        for name, lens in rules.lenses.items()
+    }
 
 
-def _split_requests(requests: list[Request], cache: JudgmentCache
+DEFAULT_LENSES = lenses_from(DEFAULT_GM)
+
+
+def _split_requests(requests: list[Request], cache: JudgmentStore
                     ) -> tuple[list[Request], dict[str, dict[str, Any]]]:
     """Drop questions already answered for this exact state and wording.
 
@@ -71,28 +88,51 @@ def _split_requests(requests: list[Request], cache: JudgmentCache
     return to_send, cached
 
 
-def _dispatch(requests: list[Request], cache: JudgmentCache, *, workers: int = 6
+def _dispatch(requests: list[Request], cache: JudgmentStore, *, workers: int = 6,
+              api: ApiConfig | None = None, stage: str = "judge",
+              progress: Progress | None = None,
+              cancelled: Callable[[], bool] | None = None,
               ) -> tuple[dict[str, dict[str, Any]], list[str], dict[str, int]]:
     to_send, answers = _split_requests(requests, cache)
     errors: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0, "requests": 0}
+    total = len(requests)
+    done = [total - len(to_send)]
+    if progress:
+        progress(stage, done[0], total)
     if to_send:
         by_key = {r.key: r for r in to_send}
-        for reply in ask_many(to_send, workers=workers):
+
+        def on_reply(reply: Reply) -> None:
+            # Store as each reply lands, so a cancelled or crashed run keeps
+            # everything it already paid for.
+            if not reply.error:
+                request = by_key[reply.key]
+                for qid, answer in reply.answers.items():
+                    cache.put(request.state, qid, request.questions[qid], answer)
+            done[0] += 1
+            if progress:
+                progress(stage, done[0], total)
+            if cancelled and cancelled():
+                raise Cancelled("cancelled")
+
+        kwargs: dict[str, Any] = {"workers": workers, "on_reply": on_reply}
+        if api is not None:
+            kwargs["api"] = api
+        for reply in ask_many(to_send, **kwargs):
             usage["requests"] += 1
             for field_name in ("input_tokens", "output_tokens"):
                 usage[field_name] += reply.usage.get(field_name, 0)
             if reply.error:
                 errors.append(f"{reply.key}: {reply.error}")
                 continue
-            request = by_key[reply.key]
             for qid, answer in reply.answers.items():
-                cache.put(request.state, qid, request.questions[qid], answer)
                 answers.setdefault(reply.key, {})[qid] = answer
     return answers, errors, usage
 
 
-def candidate_pairs(alignment: BookAlignment) -> list[tuple[Unpaired, Unpaired]]:
+def candidate_pairs(alignment: BookAlignment, similarity_floor: float = SIMILARITY_FLOOR
+                    ) -> list[tuple[Unpaired, Unpaired]]:
     """Fuzzy candidates among the rows the deterministic tiers left over.
 
     Drawn from the whole residue, not just the rows the dictionary could not
@@ -115,7 +155,7 @@ def candidate_pairs(alignment: BookAlignment) -> list[tuple[Unpaired, Unpaired]]
             similarity = fuzz.token_set_ratio(
                 old.row.description, new.row.description
             )
-            if similarity >= SIMILARITY_FLOOR:
+            if similarity >= similarity_floor:
                 out.append((old, new))
     return out
 
@@ -136,17 +176,38 @@ def event_key(index: int, event: ChangeEvent) -> str:
 
 
 def run(alignment: BookAlignment, events: list[ChangeEvent],
-        cache: JudgmentCache, *, workers: int = 6) -> Judgments:
+        cache: JudgmentStore, *, workers: int = 6,
+        rules: RuleSet | None = None, context: PromptContext | None = None,
+        api: ApiConfig | None = None, progress: Progress | None = None,
+        cancelled: Callable[[], bool] | None = None) -> Judgments:
+    """Ask every judgment the comparison needs, from cache where possible.
+
+    ``context`` names the model years and manufacturer the questions speak
+    of; it defaults to the comparison the GM rules were written for.
+    """
+    try:
+        return _run(alignment, events, cache, workers=workers,
+                    rules=rules or DEFAULT_GM, context=context or DEFAULT_CONTEXT,
+                    api=api, progress=progress, cancelled=cancelled)
+    finally:
+        cache.save()
+
+
+def _run(alignment: BookAlignment, events: list[ChangeEvent], cache: JudgmentStore, *,
+         workers: int, rules: RuleSet, context: PromptContext, api: ApiConfig | None,
+         progress: Progress | None, cancelled: Callable[[], bool] | None) -> Judgments:
+    qs: QuestionSet = build_questions(rules.judge, context)
     result = Judgments()
     usage = {"input_tokens": 0, "output_tokens": 0, "requests": 0}
+    dispatch = dict(workers=workers, api=api, progress=progress, cancelled=cancelled)
 
     # Pass 1 -- identity for the residue, and direction for rewritten clauses.
     requests: list[Request] = []
     pair_index: dict[str, tuple[Unpaired, Unpaired]] = {}
-    for old, new in candidate_pairs(alignment):
+    for old, new in candidate_pairs(alignment, rules.judge.similarity_floor):
         key = f"pair:{old.sheet}:{old.row.description[:32]}->{new.row.description[:32]}"
         pair_index[key] = (old, new)
-        requests.append(pairing_request(key, old.row, new.row))
+        requests.append(pairing_request(key, old.row, new.row, qs))
 
     constraint_index: dict[str, tuple[ChangeEvent, str]] = {}
     for i, event in enumerate(events):
@@ -156,10 +217,10 @@ def run(alignment: BookAlignment, events: list[ChangeEvent],
                 constraint_index[key] = (event, delta.trim)
                 requests.append(constraint_request(
                     key, old_c, new_c, trim=delta.trim, code=event.code,
-                    description=event.description,
+                    description=event.description, qs=qs,
                 ))
 
-    answers, errors, used = _dispatch(requests, cache, workers=workers)
+    answers, errors, used = _dispatch(requests, cache, stage="judge_identity", **dispatch)
     result.errors.extend(errors)
     for k in usage:
         usage[k] += used[k]
@@ -172,20 +233,26 @@ def run(alignment: BookAlignment, events: list[ChangeEvent],
                 "outcome": route_alignment(
                     alignment_answer.get("score", 0.0),
                     alignment_answer.get("confidence"),
+                    outcomes=qs.alignment_outcomes, floor=qs.confidence_floor,
                 ),
             }
         elif key.startswith("cond:"):
             result.constraints[key] = {
                 **got,
-                "outcome": route_constraint(got.get("direction", {}).get("score", 1.0)),
+                "outcome": route_constraint(got.get("direction", {}).get("score", 1.0),
+                                            outcomes=qs.constraint_outcomes),
             }
+
+    if cancelled and cancelled():
+        raise Cancelled("cancelled")
 
     # Pass 2 -- materiality over every event.
     material_requests = [
-        materiality_request(event_key(i, event), event)
+        materiality_request(event_key(i, event), event, qs)
         for i, event in enumerate(events)
     ]
-    answers, errors, used = _dispatch(material_requests, cache, workers=workers)
+    answers, errors, used = _dispatch(material_requests, cache,
+                                      stage="judge_materiality", **dispatch)
     result.errors.extend(errors)
     for k in usage:
         usage[k] += used[k]
@@ -196,7 +263,6 @@ def run(alignment: BookAlignment, events: list[ChangeEvent],
 
     result.usage = usage
     result.cache_hits, result.cache_misses = cache.hits, cache.misses
-    cache.save()
     return result
 
 

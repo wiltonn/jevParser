@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -26,6 +26,16 @@ MODEL = "jev-latest"
 
 class JudgeError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ApiConfig:
+    """Where and as whom to ask.  ``key=None`` falls back to :func:`api_key`."""
+
+    key: str | None = None
+    endpoint: str = ENDPOINT
+    model: str = MODEL
+    timeout: float = 60.0
 
 
 def api_key() -> str:
@@ -101,14 +111,15 @@ class Reply:
         return a.get("confidence")
 
 
-def ask(request: Request, *, timeout: float = 60.0, key: str | None = None) -> Reply:
+def ask(request: Request, *, timeout: float = 60.0, key: str | None = None,
+        endpoint: str = ENDPOINT, model: str = MODEL) -> Reply:
     payload = {
-        "model": MODEL,
+        "model": model,
         "state": request.state,
         "questions": request.questions,
     }
     req = urllib.request.Request(
-        ENDPOINT,
+        endpoint,
         data=json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {key or api_key()}",
@@ -127,16 +138,26 @@ def ask(request: Request, *, timeout: float = 60.0, key: str | None = None) -> R
 
 
 def ask_many(requests: Iterable[Request], *, workers: int = 6,
-             timeout: float = 60.0) -> list[Reply]:
+             timeout: float = 60.0, api: ApiConfig | None = None,
+             on_reply: Callable[[Reply], None] | None = None) -> list[Reply]:
     """Fan out over requests.
 
     The rate limit is far above anything this tool produces (a whole comparison
     is ~100 requests), so a small pool keeps latency down without needing
-    backoff machinery.
+    backoff machinery.  ``on_reply`` is called as each reply lands, for progress.
     """
     batch = list(requests)
     if not batch:
         return []
-    key = api_key()                                # resolve once, not per thread
+    api = api or ApiConfig(timeout=timeout)
+    key = api.key or api_key()                     # resolve once, not per thread
+
+    def one(request: Request) -> Reply:
+        reply = ask(request, timeout=api.timeout, key=key,
+                    endpoint=api.endpoint, model=api.model)
+        if on_reply is not None:
+            on_reply(reply)
+        return reply
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda r: ask(r, timeout=timeout, key=key), batch))
+        return list(pool.map(one, batch))

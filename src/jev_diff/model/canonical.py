@@ -44,6 +44,25 @@ class Token(str, Enum):
         return self not in (Token.NOT_AVAILABLE, Token.BLANK)
 
 
+class OpenToken(str):
+    """A token from a ruleset-declared vocabulary (a PDF guide's ``O``, ``I``,
+    ``O/--``), where :class:`Token` is the Excel exports' closed one.
+
+    Quacks like a ``Token`` -- ``.value`` and ``.offered`` -- so everything
+    downstream reads either without branching.
+    """
+
+    __slots__ = ()
+
+    @property
+    def value(self) -> str:
+        return str(self)
+
+    @property
+    def offered(self) -> bool:
+        return str(self) not in ("", "--")
+
+
 # Longest-first so "A/D" wins over "A" and "--" is not read as two tokens.
 _TOKEN_LITERALS = sorted(
     (t.value for t in Token if t.value not in ("", "<code>")),
@@ -56,14 +75,10 @@ _CELL_RE = re.compile(
 
 Resolution = Literal["row_list", "sheet_legend", "unresolved"]
 
-Relation = Literal[
-    "requires",
-    "not_available_with",
-    "included_only_with",
-    "deleted_when",
-    "replaced_with",
-    "unstructured",
-]
+#: A clause relation name.  The vocabulary is ruleset data
+#: (``rules.ClauseRules``), plus ``"unstructured"`` for a clause no pattern
+#: matched, so it is an open string rather than a closed literal.
+Relation = str
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +141,7 @@ class Constraint:
 
 @dataclass(frozen=True, slots=True)
 class Cell:
-    token: Token
+    token: Token | OpenToken
     conditions: tuple[Constraint, ...]
     prov: Provenance
     value: str | None = None       # Color and Trim: the RPO code in the cell

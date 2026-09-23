@@ -15,9 +15,33 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
-from typing import Any
+from typing import Any, Protocol
 
 CACHE_VERSION = 1
+
+
+class JudgmentStore(Protocol):
+    """What the judgment runner needs from a cache.
+
+    The JSON file below serves the CLI; the web app keeps the same keys in a
+    database table, so either can answer for the other.
+    """
+
+    hits: int
+    misses: int
+
+    def get(self, state: Any, question_id: str,
+            question: dict[str, Any]) -> dict[str, Any] | None: ...
+
+    def put(self, state: Any, question_id: str, question: dict[str, Any],
+            answer: dict[str, Any]) -> None: ...
+
+    def save(self) -> None: ...
+
+
+def judgment_key(state: Any, question_id: str, question: dict[str, Any]) -> str:
+    """The content address of one question about one state."""
+    return _digest(state, question_id, question)
 
 
 def _digest(*parts: Any) -> str:

@@ -12,62 +12,109 @@ answered in parallel and cannot see each other.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ..classify import ChangeEvent
 from ..model.canonical import Constraint, Row
-from .client import Request, choice, noul, score
+from ..rules.context import DEFAULT_CONTEXT, PromptContext
+from ..rules.default_gm import DEFAULT_GM
+from ..rules.model import JudgeRules, QuestionTemplate
+from .client import Request
+
+# The wording of every question is ruleset data (``rules.JudgeRules``), written
+# as templates over the comparison's years and manufacturer.  Which question is
+# asked about what, and how its answer is routed, stays here.
+#
+# The rendered wording is part of every judgment cache key, so rendering must
+# be exact: the GM ruleset rendered for 2026 -> 2027 reproduces the original
+# constants character for character (``tests/test_parity.py``).
+
+
+def render_question(template: QuestionTemplate, ctx: PromptContext,
+                    names: dict[str, str]) -> dict[str, Any]:
+    q: dict[str, Any] = {
+        "type": template.type,
+        "instructions": ctx.render(template.instructions, **names),
+    }
+    if isinstance(template.criteria, dict):
+        q["criteria"] = {k: ctx.render(v, **names) for k, v in template.criteria.items()}
+    elif template.criteria:
+        q["criteria"] = [ctx.render(v, **names) for v in template.criteria]
+    return q
+
+
+@dataclass(frozen=True, slots=True)
+class QuestionSet:
+    """A ruleset's questions rendered for one comparison."""
+
+    questions: dict[str, dict[str, Any]]
+    pair_old: str
+    pair_new: str
+    cond_old: str
+    cond_new: str
+    legend: dict[str, str]
+    alignment_outcomes: tuple[str, ...]
+    constraint_outcomes: tuple[str, ...]
+    confidence_floor: float
+
+    def __getitem__(self, qid: str) -> dict[str, Any]:
+        return self.questions[qid]
+
+
+def build_questions(judge: JudgeRules | None = None,
+                    ctx: PromptContext | None = None) -> QuestionSet:
+    judge = judge or DEFAULT_GM.judge
+    ctx = ctx or DEFAULT_CONTEXT
+    keys = judge.state_keys
+    names = {
+        "pair_old": ctx.render(keys.pair_old), "pair_new": ctx.render(keys.pair_new),
+        "cond_old": ctx.render(keys.cond_old), "cond_new": ctx.render(keys.cond_new),
+    }
+    return QuestionSet(
+        questions={qid: render_question(t, ctx, names) for qid, t in judge.questions.items()},
+        legend=dict(judge.token_legend),
+        alignment_outcomes=tuple(judge.alignment_outcomes),
+        constraint_outcomes=tuple(judge.constraint_outcomes),
+        confidence_floor=judge.confidence_floor,
+        **names,
+    )
+
+
+#: The GM questions for 2026 -> 2027, under their original names.
+DEFAULT_QUESTIONS = build_questions()
+
 
 # --------------------------------------------------------------------------
 # A. Identity -- asked only about rows the deterministic tiers could not pair.
 # --------------------------------------------------------------------------
 
-ALIGNMENT = score(
-    instructions=(
-        "Two rows from the same worksheet of a GM vehicle order guide, one from "
-        "the 2026 model year (`row_2026`) and one from 2027 (`row_2027`). How do "
-        "they relate as entries in the order guide?"
-    ),
-    criteria=[
-        "The rows describe unrelated equipment: a buyer reading one would not "
-        "expect the other. For example one is a seating package and the other "
-        "is a wheel.",
-        "The rows describe equipment in the same subsystem, and one may be a "
-        "successor, a variant, a renamed version, or a package that absorbed "
-        "the other. A reader could reasonably argue either that these are one "
-        "entry or two.",
-        "The rows are the same order-guide entry for the same equipment. Any "
-        "difference in wording is how the same equipment was described, not "
-        "different equipment.",
-    ],
-)
-
-SUCCESSION = noul(
-    "`row_2026` names equipment that is no longer offered, and `row_2027` names "
-    "the equipment that replaced it in the same position in the lineup."
-)
-
-ABSORBED = noul(
-    "The equipment listed in `row_2026` is now bundled inside the package "
-    "described in `row_2027` rather than being offered on its own."
-)
+ALIGNMENT = DEFAULT_QUESTIONS["alignment"]
+SUCCESSION = DEFAULT_QUESTIONS["succession"]
+ABSORBED = DEFAULT_QUESTIONS["absorbed"]
 
 #: Score levels map to outcomes by nearest-level rounding, so the boundaries
 #: come from the level wording rather than a fitted threshold.
-ALIGNMENT_OUTCOMES = ("unlink", "review", "pair")
+ALIGNMENT_OUTCOMES = DEFAULT_QUESTIONS.alignment_outcomes
 
 #: Below this, even a confident-looking pairing goes to the review queue.
-CONFIDENCE_FLOOR = 0.75
+CONFIDENCE_FLOOR = DEFAULT_QUESTIONS.confidence_floor
 
 
-def route_alignment(value: float, confidence: float | None) -> str:
-    outcome = ALIGNMENT_OUTCOMES[min(int(value + 0.5), len(ALIGNMENT_OUTCOMES) - 1)]
-    if outcome == "pair" and (confidence or 0.0) < CONFIDENCE_FLOOR:
-        return "review"
+def route_alignment(value: float, confidence: float | None, *,
+                    outcomes: tuple[str, ...] = ALIGNMENT_OUTCOMES,
+                    floor: float = CONFIDENCE_FLOOR) -> str:
+    outcome = outcomes[min(int(value + 0.5), len(outcomes) - 1)]
+    # The last outcome is the positive one ("pair"); it must also be confident.
+    if outcome == outcomes[-1] and (confidence or 0.0) < floor:
+        return outcomes[1]
     return outcome
 
 
-def pairing_request(key: str, row_a: Row, row_b: Row) -> Request:
+def pairing_request(key: str, row_a: Row, row_b: Row,
+                    qs: QuestionSet | None = None) -> Request:
+    qs = qs or DEFAULT_QUESTIONS
+
     def describe(row: Row) -> dict[str, Any]:
         return {
             "sheet": row.sheet,
@@ -78,11 +125,11 @@ def pairing_request(key: str, row_a: Row, row_b: Row) -> Request:
 
     return Request(
         key=key,
-        state={"row_2026": describe(row_a), "row_2027": describe(row_b)},
+        state={qs.pair_old: describe(row_a), qs.pair_new: describe(row_b)},
         questions={
-            "alignment": ALIGNMENT,
-            "succession": SUCCESSION,
-            "absorbed": ABSORBED,
+            "alignment": qs["alignment"],
+            "succession": qs["succession"],
+            "absorbed": qs["absorbed"],
         },
     )
 
@@ -93,35 +140,20 @@ def pairing_request(key: str, row_a: Row, row_b: Row) -> Request:
 #    restriction moved.
 # --------------------------------------------------------------------------
 
-CONSTRAINT_DIRECTION = score(
-    instructions=(
-        "`condition_2026` and `condition_2027` are the ordering constraints "
-        "attached to the same option for the same trim level. Considering which "
-        "vehicle configurations can be ordered, how does the 2027 constraint "
-        "compare?"
-    ),
-    criteria=[
-        "Configurations that could be ordered in 2026 can no longer be ordered "
-        "in 2027: the option now requires something extra, or is now blocked by "
-        "a combination that used to be allowed.",
-        "The same configurations can be ordered under both constraints. The "
-        "wording differs, or a referenced option was renamed or renumbered, but "
-        "no configuration changes from orderable to un-orderable or the reverse.",
-        "Configurations that could not be ordered in 2026 can be ordered in "
-        "2027: a prerequisite was dropped, or an additional way to get the "
-        "option was added.",
-    ],
-)
+CONSTRAINT_DIRECTION = DEFAULT_QUESTIONS["direction"]
 
-CONSTRAINT_OUTCOMES = ("tightened", "equivalent", "loosened")
+CONSTRAINT_OUTCOMES = DEFAULT_QUESTIONS.constraint_outcomes
 
 
-def route_constraint(value: float) -> str:
-    return CONSTRAINT_OUTCOMES[min(int(value + 0.5), len(CONSTRAINT_OUTCOMES) - 1)]
+def route_constraint(value: float, *,
+                     outcomes: tuple[str, ...] = CONSTRAINT_OUTCOMES) -> str:
+    return outcomes[min(int(value + 0.5), len(outcomes) - 1)]
 
 
 def constraint_request(key: str, old: Constraint, new: Constraint, *,
-                       trim: str, code: str | None, description: str) -> Request:
+                       trim: str, code: str | None, description: str,
+                       qs: QuestionSet | None = None) -> Request:
+    qs = qs or DEFAULT_QUESTIONS
     return Request(
         key=key,
         state={
@@ -130,10 +162,10 @@ def constraint_request(key: str, old: Constraint, new: Constraint, *,
             "trim_level": trim,
             "relation": old.relation,
             "referenced_options": sorted(old.referenced_codes) or None,
-            "condition_2026": old.raw,
-            "condition_2027": new.raw,
+            qs.cond_old: old.raw,
+            qs.cond_new: new.raw,
         },
-        questions={"direction": CONSTRAINT_DIRECTION},
+        questions={"direction": qs["direction"]},
     )
 
 
@@ -142,65 +174,12 @@ def constraint_request(key: str, old: Constraint, new: Constraint, *,
 #        about each change event.
 # --------------------------------------------------------------------------
 
-DESCRIPTION_KIND = choice(
-    instructions=(
-        "Only the wording describing this option changed between the model "
-        "years. What kind of edit was it?"
-    ),
-    criteria={
-        "marketing": "Promotional phrasing was added, dropped or rewritten, "
-                     "with no change to what the equipment is or does.",
-        "correction": "A specific factual detail was corrected or made more "
-                      "precise, such as a measurement, a capacity or a name.",
-        "capability": "The described capability of the equipment changed: it "
-                      "now does more, less, or something different.",
-        "housekeeping": "An editorial change with no reader-visible meaning, "
-                        "such as punctuation, ordering or a reference marker.",
-    },
-)
-
-ORDER_RISK = score(
-    instructions=(
-        "A dealer or fleet configurator has a saved 2026 build sheet and is "
-        "re-ordering the same vehicle for 2027. What happens to that order "
-        "because of `change`?"
-    ),
-    criteria=[
-        # Level 0 must cover a *loosened* restriction as well as a pure wording
-        # change. Tying it to "only the wording differs" left a lifted
-        # constraint with no fitting level, and the answers came back split
-        # between this level and the most severe one.
-        "The same order succeeds and builds the same vehicle. Either nothing "
-        "changed but the wording, or a restriction was lifted so configurations "
-        "that were blocked before can now be ordered.",
-        "The order still succeeds, but the vehicle differs from what was "
-        "expected: an item is now bundled into a package, installed by the "
-        "dealer rather than the factory, or fitted as standard rather than "
-        "ordered separately.",
-        "The order is rejected or has to be rebuilt: an option code no longer "
-        "exists, has become reference-only, or now conflicts with another code "
-        "on the order.",
-    ],
-)
-
-CONTENT_CHURN = score(
-    instructions=(
-        "A marketing team maintains web pages, brochures and spec tables built "
-        "from the 2026 order guide. What must they change because of `change`?"
-    ),
-    criteria=[
-        "Nothing. No published sentence or table cell derived from this row "
-        "changes.",
-        "A published table cell or availability footnote changes, but no prose "
-        "is rewritten.",
-        "Published prose must be rewritten, or a feature must be added to or "
-        "removed from a page, because the equipment or its described capability "
-        "changed.",
-    ],
-)
+DESCRIPTION_KIND = DEFAULT_QUESTIONS["description_kind"]
+ORDER_RISK = DEFAULT_QUESTIONS["order_risk"]
+CONTENT_CHURN = DEFAULT_QUESTIONS["content_churn"]
 
 
-def event_state(event: ChangeEvent) -> dict[str, Any]:
+def event_state(event: ChangeEvent, legend: dict[str, str] | None = None) -> dict[str, Any]:
     """Serialize the deterministic delta for the model to judge.
 
     The model is given what code already worked out -- which trims moved, in
@@ -227,23 +206,19 @@ def event_state(event: ChangeEvent) -> dict[str, Any]:
             "summary": event.detail or None,
             "trims_affected": moves or None,
         },
-        "legend": {
-            "S": "standard equipment",
-            "A": "available as a separate order",
-            "A/D": "available, dealer-installed",
-            "■": "included in an equipment group",
-            "--": "not available",
-        },
+        "legend": dict(legend if legend is not None else DEFAULT_QUESTIONS.legend),
     }
 
 
-def materiality_request(key: str, event: ChangeEvent) -> Request:
+def materiality_request(key: str, event: ChangeEvent,
+                        qs: QuestionSet | None = None) -> Request:
+    qs = qs or DEFAULT_QUESTIONS
     questions: dict[str, Any] = {
-        "order_risk": ORDER_RISK,
-        "content_churn": CONTENT_CHURN,
+        "order_risk": qs["order_risk"],
+        "content_churn": qs["content_churn"],
     }
     # Only worth asking where code genuinely cannot tell marketing copy from a
     # spec correction.
     if event.kind == "description":
-        questions["description_kind"] = DESCRIPTION_KIND
-    return Request(key=key, state=event_state(event), questions=questions)
+        questions["description_kind"] = qs["description_kind"]
+    return Request(key=key, state=event_state(event, qs.legend), questions=questions)

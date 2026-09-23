@@ -8,9 +8,12 @@ import json
 import sys
 from pathlib import Path
 
-from .align.pairing import align_books
-from .classify import build_events, consolidate
-from .parse.registry import parse_workbook
+from .rules import PromptContext, RuleSet, default_rules
+from .rules import load as load_rules
+
+
+def _rules(args: argparse.Namespace) -> RuleSet:
+    return load_rules(args.ruleset) if getattr(args, "ruleset", None) else default_rules()
 
 
 def _encode(obj):
@@ -37,7 +40,10 @@ def _report(book) -> None:
 
 
 def cmd_parse(args: argparse.Namespace) -> int:
-    book = parse_workbook(args.workbook, args.label or Path(args.workbook).stem[:4])
+    from .pipeline import parse_document
+
+    book = parse_document(args.workbook, args.label or Path(args.workbook).stem[:4],
+                          _rules(args))
     _report(book)
 
     fatal = [w for w in book.warnings if w.severity == "fatal"]
@@ -72,8 +78,13 @@ def cmd_parse(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    book_a = parse_workbook(args.old, args.old_label or Path(args.old).stem[:4])
-    book_b = parse_workbook(args.new, args.new_label or Path(args.new).stem[:4])
+    from .pipeline import compare, parse_document
+
+    rules = _rules(args)
+    label_a = args.old_label or Path(args.old).stem[:4]
+    label_b = args.new_label or Path(args.new).stem[:4]
+    book_a = parse_document(args.old, label_a, rules)
+    book_b = parse_document(args.new, label_b, rules)
 
     fatal = [w for w in book_a.warnings + book_b.warnings if w.severity == "fatal"]
     for warning in book_a.warnings + book_b.warnings:
@@ -84,8 +95,18 @@ def cmd_compare(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    alignment = align_books(book_a, book_b)
-    events = consolidate(build_events(book_a, book_b, alignment))
+    store = None
+    if args.judge:
+        from .judge.cache import JudgmentCache
+
+        store = JudgmentCache(args.cache)
+    result = compare(
+        args.old, args.new, label_a=label_a, label_b=label_b, rules=rules,
+        context=PromptContext(old_year=label_a, new_year=label_b, oem=args.oem),
+        store=store, judge=args.judge, workers=args.workers,
+        books=(book_a, book_b),
+    )
+    alignment, events = result.alignment, result.events
 
     tiers: dict[int, int] = {}
     for sheet in alignment.sheets.values():
@@ -111,11 +132,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
           f"a constraint judgment")
 
     if args.judge:
-        from .judge.cache import JudgmentCache
-        from .judge.run import DEFAULT_LENSES, band, lens_value, run
+        from .judge.run import band, lens_value, lenses_from
 
-        cache = JudgmentCache(args.cache)
-        judgments = run(alignment, events, cache, workers=args.workers)
+        judgments = result.judgments
         spend = judgments.usage["input_tokens"] * 0.042 / 1_000_000
         print(f"judged   {judgments.usage['requests']} requests  "
               f"{judgments.usage['input_tokens']:,} input tokens  ~${spend:.4f}  "
@@ -129,7 +148,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
         if outcomes:
             print("pairing  " + "  ".join(f"{k}={v}" for k, v in sorted(outcomes.items())))
 
-        lens = DEFAULT_LENSES[args.lens]
+        lenses = lenses_from(rules)
+        if args.lens not in lenses:
+            print(f"unknown lens {args.lens!r}; this ruleset defines "
+                  f"{', '.join(lenses)}", file=sys.stderr)
+            return 2
+        lens = lenses[args.lens]
         bands: dict[str, int] = {}
         for event in events:
             bands[band(event, lens)] = bands.get(band(event, lens), 0) + 1
@@ -155,10 +179,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
         if args.out:
             from .render.html import render as render_html
-            from .render.payload import build as build_payload
 
-            payload = build_payload(book_a, book_b, alignment, events, judgments)
-            Path(args.out).write_text(render_html(payload), encoding="utf-8")
+            Path(args.out).write_text(render_html(result.payload), encoding="utf-8")
             print(f"report   {args.out}")
 
         print()
@@ -196,6 +218,33 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rules_export(args: argparse.Namespace) -> int:
+    from .rules import built_in
+
+    text = built_in()[args.ruleset].to_json() + "\n"
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"wrote {args.out}", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def cmd_rules_validate(args: argparse.Namespace) -> int:
+    from pydantic import ValidationError
+
+    try:
+        rules = load_rules(args.file)
+    except ValidationError as exc:
+        print(f"{args.file}: invalid ruleset\n{exc}", file=sys.stderr)
+        return 1
+    print(f"{args.file}: ok  {rules.name!r}  format={rules.format}  "
+          f"sheets={len(rules.sheets.sheets)}  "
+          f"patterns={len(rules.clauses.anchored) + len(rules.clauses.fallback)}  "
+          f"hash={rules.content_hash()[:12]}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="jev-diff",
@@ -207,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("workbook")
     p.add_argument("--label", help="model year label (default: inferred)")
     p.add_argument("--json", help="write the canonical model to this path")
+    p.add_argument("--ruleset", help="ruleset JSON (default: built-in GM rules)")
     p.set_defaults(func=cmd_parse)
 
     c = sub.add_parser("compare", help="diff two workbooks")
@@ -218,8 +268,11 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--show", action="store_true", help="list the change events")
     c.add_argument("--judge", action="store_true",
                    help="run the Jev judgments and rank by lens")
-    c.add_argument("--lens", default="ordering", choices=("ordering", "content"),
-                   help="which materiality lens ranks the report")
+    c.add_argument("--lens", default="ordering",
+                   help="which materiality lens ranks the report (default: ordering)")
+    c.add_argument("--ruleset", help="ruleset JSON (default: built-in GM rules)")
+    c.add_argument("--oem", default="GM",
+                   help="manufacturer name used in judgment questions (default: GM)")
     c.add_argument("--cache", default=".jev-cache/judgments.json",
                    help="judgment cache path")
     c.add_argument("--workers", type=int, default=8)
@@ -228,6 +281,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="write an annotated copy of the newer workbook "
                         "(V1: embedded images are not preserved)")
     c.set_defaults(func=cmd_compare)
+
+    r = sub.add_parser("rules", help="work with ruleset files")
+    rsub = r.add_subparsers(dest="rules_command", required=True)
+    re_ = rsub.add_parser("export-default", help="write a built-in ruleset as JSON")
+    re_.add_argument("-o", "--out")
+    re_.add_argument("--ruleset", default="gm", choices=("gm", "ford-pdf"),
+                     help="which built-in ruleset (default: gm)")
+    re_.set_defaults(func=cmd_rules_export)
+    rv = rsub.add_parser("validate", help="check a ruleset file")
+    rv.add_argument("file")
+    rv.set_defaults(func=cmd_rules_validate)
 
     args = parser.parse_args(argv)
     return args.func(args)

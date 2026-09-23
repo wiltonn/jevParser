@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import ClassVar, Literal
 
 from rapidfuzz import fuzz
 
@@ -20,22 +20,17 @@ from .align.axes import AxisAlignment, align_axis
 from .align.pairing import BookAlignment, Pair, Unpaired
 from .model.canonical import Cell, Constraint, Provenance, Token, Workbook
 from .parse.constraints import ORDERING_RELATIONS, PROSE_RELATIONS
+from .rules.default_gm import DEFAULT_GM
+from .rules.model import ClassifyRules, RuleSet
 
 #: The four ways a feature can be had.  Direction is computed between *classes*,
 #: not raw tokens, because "A -> A/D" and "A -> S" are different in kind.
 STANDARD, PACKAGE, OPTIONAL, UNAVAILABLE = "standard", "package", "optional", "unavailable"
 
+#: Token -> class.  The lattice is ruleset data (``rules.ClassifyRules``,
+#: keyed by token text); this is the GM default.
 _CLASS: dict[Token, str] = {
-    Token.STANDARD: STANDARD,
-    Token.INCLUDED: PACKAGE,
-    Token.UPGRADEABLE: PACKAGE,
-    Token.AVAILABLE: OPTIONAL,
-    Token.AVAILABLE_ADI: OPTIONAL,
-    Token.ADI: OPTIONAL,
-    Token.NOT_AVAILABLE: UNAVAILABLE,
-    Token.BLANK: UNAVAILABLE,
-    Token.MULTI_MODEL: OPTIONAL,
-    Token.CODE: OPTIONAL,
+    Token(value): cls for value, cls in DEFAULT_GM.classify.token_classes.items()
 }
 
 Direction = Literal[
@@ -57,8 +52,18 @@ ORDER_AFFECTING = frozenset({
 })
 
 
-def _direction(a: Token, b: Token) -> Direction:
-    ca, cb = _CLASS[a], _CLASS[b]
+def _direction(a: Token, b: Token,
+               token_classes: dict[str, str] | ClassifyRules | None = None) -> Direction:
+    if token_classes is None:
+        ca, cb = _CLASS[a], _CLASS[b]
+    elif isinstance(token_classes, ClassifyRules):
+        ca, cb = token_classes.class_of(a.value), token_classes.class_of(b.value)
+        if ca is None or cb is None:
+            # A token the parser let through with a warning: say it changed,
+            # without claiming a direction.
+            return "unchanged" if a == b else "fulfillment_shift"
+    else:
+        ca, cb = token_classes[a.value], token_classes[b.value]
     if a == b:
         return "unchanged"
     if ca == cb:
@@ -78,7 +83,7 @@ def _direction(a: Token, b: Token) -> Direction:
     return "package_shift"
 
 
-@dataclass(slots=True)
+@dataclass
 class ConstraintDelta:
     """What changed among a cell's resolved conditions.
 
@@ -93,6 +98,12 @@ class ConstraintDelta:
     added: tuple[Constraint, ...] = ()
     removed: tuple[Constraint, ...] = ()
     rewritten: tuple[tuple[Constraint, Constraint], ...] = ()
+
+    #: The ruleset's ordering relations.  Deliberately not a dataclass field:
+    #: it is configuration, not part of the delta, so serialized deltas and
+    #: everything hashed from them stay independent of it.  An instance built
+    #: under another ruleset shadows it.
+    ordering: ClassVar[frozenset[str]] = ORDERING_RELATIONS
 
     @property
     def any(self) -> bool:
@@ -109,7 +120,7 @@ class ConstraintDelta:
         rather than assumed either way.
         """
         return any(
-            c.relation in ORDERING_RELATIONS
+            c.relation in self.ordering
             for c in self.added + self.removed
         )
 
@@ -123,14 +134,14 @@ class ConstraintDelta:
     def loosened(self) -> bool:
         """A restriction was dropped and none added: strictly easier to order."""
         return bool(self.removed) and not any(
-            c.relation in ORDERING_RELATIONS for c in self.added
-        ) and any(c.relation in ORDERING_RELATIONS for c in self.removed)
+            c.relation in self.ordering for c in self.added
+        ) and any(c.relation in self.ordering for c in self.removed)
 
     @property
     def tightened(self) -> bool:
         return bool(self.added) and not any(
-            c.relation in ORDERING_RELATIONS for c in self.removed
-        ) and any(c.relation in ORDERING_RELATIONS for c in self.added)
+            c.relation in self.ordering for c in self.removed
+        ) and any(c.relation in self.ordering for c in self.added)
 
     @property
     def needs_judgment(self) -> tuple[tuple[Constraint, Constraint], ...]:
@@ -141,7 +152,7 @@ class ConstraintDelta:
         """
         return tuple(
             (old, new) for old, new in self.rewritten
-            if old.relation in ORDERING_RELATIONS
+            if old.relation in self.ordering
         )
 
 
@@ -154,10 +165,12 @@ def _shape(c: Constraint) -> tuple:
 #: the other rather than an unrelated addition and removal.  Without this, the
 #: many code-less boilerplate clauses on subscription rows all share one shape
 #: and pair arbitrarily with each other.
-REWRITE_SIMILARITY = 60.0
+REWRITE_SIMILARITY = DEFAULT_GM.classify.rewrite_similarity
 
 
-def _constraint_delta(a: Cell | None, b: Cell | None) -> ConstraintDelta:
+def _constraint_delta(a: Cell | None, b: Cell | None, *,
+                      rewrite_similarity: float = REWRITE_SIMILARITY,
+                      ordering: frozenset[str] | None = None) -> ConstraintDelta:
     """Diff resolved clauses, so footnote renumbering vanishes.
 
     Two passes: exact clause equality first (which absorbs renumbering), then
@@ -182,7 +195,7 @@ def _constraint_delta(a: Cell | None, b: Cell | None) -> ConstraintDelta:
             if _shape(n) == _shape(old)
         ]
         best = max(candidates, default=None)
-        if best is not None and best[0] >= REWRITE_SIMILARITY:
+        if best is not None and best[0] >= rewrite_similarity:
             left.remove(old)
             right.remove(best[2])
             rewritten.append((old, best[2]))
@@ -192,11 +205,14 @@ def _constraint_delta(a: Cell | None, b: Cell | None) -> ConstraintDelta:
     # makes the judgment cache key differ between runs -- every judgment would
     # be re-billed on each invocation.
     by_key = lambda c: c.key()
-    return ConstraintDelta(
+    delta = ConstraintDelta(
         added=tuple(sorted(right, key=by_key)),
         removed=tuple(sorted(left, key=by_key)),
         rewritten=tuple(sorted(rewritten, key=lambda pair: pair[0].key())),
     )
+    if ordering is not None and ordering != ConstraintDelta.ordering:
+        delta.ordering = ordering
+    return delta
 
 
 @dataclass(slots=True)
@@ -215,19 +231,25 @@ class CellDelta:
         return self.direction not in ("unchanged", "incomparable")
 
 
-def cell_deltas(pair: Pair, axes: AxisAlignment) -> list[CellDelta]:
+def cell_deltas(pair: Pair, axes: AxisAlignment,
+                rules: RuleSet | None = None) -> list[CellDelta]:
     """Compare a paired row's cells by axis identity, never by position."""
+    rules = rules or DEFAULT_GM
+    token_classes = (None if rules.classify == DEFAULT_GM.classify else rules.classify)
+    ordering = rules.clauses.ordering
     out: list[CellDelta] = []
     for col_a, col_b in axes.pairs:
         a = pair.a.values.get(col_a.axis_id)
         b = pair.b.values.get(col_b.axis_id)
         if a is None and b is None:
             continue
-        constraints = _constraint_delta(a, b)
+        constraints = _constraint_delta(
+            a, b, rewrite_similarity=rules.classify.rewrite_similarity,
+            ordering=ordering)
         if a is None or b is None:
             direction: Direction = "incomparable"
         else:
-            direction = _direction(a.token, b.token)
+            direction = _direction(a.token, b.token, token_classes)
             if direction == "unchanged" and constraints.any:
                 direction = "constraint_only"
         out.append(CellDelta(
@@ -350,9 +372,22 @@ def _describe(pair: Pair, deltas: list[CellDelta]) -> str:
 
 
 def build_events(book_a: Workbook, book_b: Workbook,
-                 alignment: BookAlignment) -> list[ChangeEvent]:
+                 alignment: BookAlignment,
+                 rules: RuleSet | None = None) -> list[ChangeEvent]:
     """Turn an alignment into typed, deterministically-described change events."""
     events: list[ChangeEvent] = []
+
+    # A worksheet or section present in only one year is itself a change; its
+    # rows are not compared, so say so rather than dropping it silently.
+    dictionary = (rules or DEFAULT_GM).sheets.dictionary_sheet
+    for book, other, verb in ((book_a, book_b, "removed"), (book_b, book_a, "added")):
+        for name, sheet in book.sheets.items():
+            if name in other.sheets or name == dictionary or sheet.kind == "flat_lookup":
+                continue
+            events.append(ChangeEvent(
+                kind="identity", sheet=name, code=None, description="worksheet",
+                detail=f"{verb}: {name} ({len(sheet.rows)} rows)",
+            ))
 
     for name, sheet_align in alignment.sheets.items():
         axes = align_axis(book_a.sheets[name].columns, book_b.sheets[name].columns)
@@ -373,7 +408,7 @@ def build_events(book_a: Workbook, book_b: Workbook,
             ))
 
         for pair in sheet_align.pairs:
-            deltas = cell_deltas(pair, axes)
+            deltas = cell_deltas(pair, axes, rules)
             changed = [d for d in deltas if d.changed]
 
             if pair.code_column_swapped:
@@ -493,6 +528,14 @@ def consolidate(events: list[ChangeEvent]) -> list[ChangeEvent]:
     for event in out:
         event.eid = event_id(event)
         clash = seen.get(event.eid)
+        if clash is not None and clash.sheet != event.sheet:
+            # The same entry changed differently on two sheets (one standard-
+            # equipment list per series), so the changes did not merge.  The
+            # sheet tells them apart; ids of unclashing events are unaffected.
+            event.eid = hashlib.blake2b(
+                (_id_basis(event) + "\0" + event.sheet).encode("utf-8"), digest_size=4
+            ).hexdigest()
+            clash = seen.get(event.eid)
         if clash is not None:
             # Two cards sharing one address would make deep links land on the
             # wrong change.  Fail rather than emit it.

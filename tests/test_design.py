@@ -110,3 +110,12 @@ def test_the_bundle_holds_components_only():
     app = (Path(tokens.__file__).parent / "assets" / "app.js").read_text()
     for behaviour in ("applyLens", "bandOf", "stateParams"):
         assert f"function {behaviour}(" in app, behaviour
+
+
+def test_web_app_tokens_match_design_system():
+    """The React app's generated tokens must be today's tokens.json.
+
+    Regenerate with ``npm --prefix web run design``.
+    """
+    generated = Path(__file__).resolve().parents[1] / "web" / "src" / "design" / "tokens.gen.css"
+    assert generated.read_text(encoding="utf-8") == tokens.css()

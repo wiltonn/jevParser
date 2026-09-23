@@ -12,7 +12,7 @@ branch on sheet kind.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -30,6 +30,17 @@ from ..model.canonical import (
     Workbook,
     parse_cell_token,
 )
+from ..rules.default_gm import DEFAULT_GM
+from ..rules.model import (
+    ClauseRules,
+    FeatureSheet,
+    FlatSheet,
+    GridSheet,
+    KeyedSheet,
+    RuleSet,
+    SheetRegistry,
+    StackedSheet,
+)
 from .constraints import cited_codes
 from .footnotes import (
     constraints_for,
@@ -43,42 +54,48 @@ from .footnotes import (
     strip_label_refs,
 )
 
-#: sheet name -> (kind, description column index, first trim column index)
+# Which worksheets exist and how each is shaped is ruleset data
+# (``rules.SheetRegistry``).  The names below are the GM defaults in their
+# original shape, kept for callers that predate rulesets.
+
+def _names(kind: type) -> tuple[str, ...]:
+    return tuple(r.name for r in DEFAULT_GM.sheets.sheets if isinstance(r, kind))
+
+
+#: sheet name -> (description column index, first trim column index), 0-based.
 FEATURE_SHEETS: dict[str, tuple[int, int]] = {
-    "Standard Equipment": (2, 3),
-    "Equipment Groups": (2, 3),
-    "Interior": (2, 3),
-    "Exterior": (2, 3),
-    "Mechanical": (2, 3),
-    "SEO Ship Thru": (2, 3),
-    "OnStar SiriusXM Fleet Options": (2, 3),
-    # Wheels inserts an extra "Wheels" column, shifting everything right by one.
-    "Wheels": (3, 4),
+    r.name: (r.desc_col - 1, r.first_axis_col - 1)
+    for r in DEFAULT_GM.sheets.sheets if isinstance(r, FeatureSheet)
 }
-
-#: sheet name -> header row (1-based).  These differ per sheet and are pinned
-#: rather than sniffed, because getting them wrong silently shifts every value.
-KEYED_SHEETS: dict[str, int] = {"Specs": 1, "Dimensions": 2}
-
-STACKED_SHEETS = ("Color and Trim",)
-GRID_SHEETS = ("Engine Axles", "Trailering Specs")
-FLAT_SHEETS = ("All",)
+#: sheet name -> header row (1-based).
+KEYED_SHEETS: dict[str, int] = {
+    r.name: r.header_row for r in DEFAULT_GM.sheets.sheets if isinstance(r, KeyedSheet)
+}
+STACKED_SHEETS = _names(StackedSheet)
+GRID_SHEETS = _names(GridSheet)
+FLAT_SHEETS = _names(FlatSheet)
 
 FEATURE_HEADER_ROW = 3
 
 
-def kind_of(name: str) -> str:
-    if name in FEATURE_SHEETS:
-        return "feature_matrix"
-    if name in KEYED_SHEETS:
-        return "keyed_rows"
-    if name in STACKED_SHEETS:
-        return "stacked_matrix"
-    if name in GRID_SHEETS:
-        return "grid"
-    if name in FLAT_SHEETS:
-        return "flat_lookup"
-    return "unknown"
+def kind_of(name: str, registry: SheetRegistry | None = None) -> str:
+    rule = (registry or DEFAULT_GM.sheets).rule_for(name)
+    return rule.kind if rule else "unknown"
+
+
+@dataclass(slots=True)
+class ParseContext:
+    """Everything a sheet parser needs besides the worksheet itself."""
+
+    label: str
+    path: str
+    warnings: list[Warning_]
+    rules: RuleSet
+    rule: object = None          # the SheetRule matched for this worksheet
+
+    @property
+    def clauses(self) -> ClauseRules:
+        return self.rules.clauses
 
 
 def _a1(row: int, col: int) -> str:
@@ -105,7 +122,8 @@ def _full_width_merges(ws) -> dict[int, str]:
 
 def _columns(ws, header_row: int, first_col: int, *, footer_notes=None,
              legend: Legend | None = None,
-             refs_on_headers: bool = False) -> list[AxisEntry]:
+             refs_on_headers: bool = False,
+             clauses: ClauseRules | None = None) -> list[AxisEntry]:
     """Build the column axis.
 
     Headers carry the trim name and its order code together
@@ -133,20 +151,21 @@ def _columns(ws, header_row: int, first_col: int, *, footer_notes=None,
             index=col,
             order_code=order_code,
             refs=refs,
-            conditions=constraints_for(refs),
+            conditions=constraints_for(refs, clauses),
         ))
     return cols
 
 
-def _parse_feature_matrix(ws, wb_label: str, path: str,
-                          warnings: list[Warning_]) -> Sheet:
-    desc_col0, first_trim0 = FEATURE_SHEETS[ws.title]
-    desc_col, first_trim = desc_col0 + 1, first_trim0 + 1   # to 1-based
+def _parse_feature_matrix(ws, ctx: ParseContext) -> Sheet:
+    rule: FeatureSheet = ctx.rule
+    wb_label, warnings, clauses = ctx.label, ctx.warnings, ctx.clauses
+    desc_col, first_trim, header_row = rule.desc_col, rule.first_axis_col, rule.header_row
 
     legend = parse_legend(
         _text(ws.cell(1, desc_col).value), _text(ws.cell(2, desc_col).value)
     )
-    columns = _columns(ws, FEATURE_HEADER_ROW, first_trim - 1, legend=legend)
+    columns = _columns(ws, header_row, first_trim - 1, legend=legend,
+                       clauses=clauses)
     merges = _full_width_merges(ws)
 
     rows: list[Row] = []
@@ -154,7 +173,7 @@ def _parse_feature_matrix(ws, wb_label: str, path: str,
     seen: dict[tuple, int] = {}
     sheet_notes: dict[int, str] = {}
 
-    for r in range(FEATURE_HEADER_ROW + 1, ws.max_row + 1):
+    for r in range(header_row + 1, ws.max_row + 1):
         if r in merges:
             body = merges[r]
             if looks_like_footer(body):
@@ -164,8 +183,8 @@ def _parse_feature_matrix(ws, wb_label: str, path: str,
             continue
 
         raw_desc = _text(ws.cell(r, desc_col).value)
-        orderable = _text(ws.cell(r, 1).value).strip() or None
-        ref = _text(ws.cell(r, 2).value).strip() or None
+        orderable = _text(ws.cell(r, rule.orderable_col).value).strip() or None
+        ref = _text(ws.cell(r, rule.ref_col).value).strip() or None
         if not raw_desc.strip() and not orderable and not ref:
             continue
 
@@ -199,7 +218,7 @@ def _parse_feature_matrix(ws, wb_label: str, path: str,
                 ))
             values[c.axis_id] = Cell(
                 token=token if token is not None else Token.CODE,
-                conditions=constraints_for(refs),
+                conditions=constraints_for(refs, clauses),
                 refs=refs,
                 value=code,
                 prov=Provenance(wb_label, ws.title, _a1(r, c.index), r,
@@ -213,7 +232,7 @@ def _parse_feature_matrix(ws, wb_label: str, path: str,
             sheet=ws.title, section_path=section, occurrence_index=occ,
             description=normalize_description(base), display_description=base,
             values=values, orderable_rpo=orderable, ref_rpo=ref,
-            footnotes=row_notes, cited_codes=cited_codes(raw_desc),
+            footnotes=row_notes, cited_codes=cited_codes(raw_desc, clauses),
             prov=Provenance(wb_label, ws.title, _a1(r, desc_col), r, desc_col,
                             raw_desc),
         ))
@@ -222,14 +241,15 @@ def _parse_feature_matrix(ws, wb_label: str, path: str,
                  columns=columns, legend=legend, footnotes=sheet_notes)
 
 
-def _parse_keyed_rows(ws, wb_label: str, path: str,
-                      warnings: list[Warning_]) -> Sheet:
+def _parse_keyed_rows(ws, ctx: ParseContext) -> Sheet:
     """Specs / Dimensions: a label column plus drivetrain columns.
 
     The label here is *data* -- "Turning diameter (with 18\" wheels)" -- so a
     changed label is a change event, not a remove-plus-add.
     """
-    header_row = KEYED_SHEETS[ws.title]
+    rule: KeyedSheet = ctx.rule
+    wb_label = ctx.label
+    header_row, label_col = rule.header_row, rule.label_col
     merges = _full_width_merges(ws)
     footer_notes: dict[int, str] = {
         r: body for r, body in merges.items() if looks_like_footer(body)
@@ -238,8 +258,8 @@ def _parse_keyed_rows(ws, wb_label: str, path: str,
     for body in footer_notes.values():
         notes.update(parse_footer(body))
 
-    columns = _columns(ws, header_row, 1, footer_notes=notes,
-                       refs_on_headers=True)
+    columns = _columns(ws, header_row, rule.first_axis_col - 1, footer_notes=notes,
+                       refs_on_headers=True, clauses=ctx.clauses)
     rows: list[Row] = []
     section: tuple[str, ...] = ()
     seen: dict[tuple, int] = {}
@@ -250,7 +270,7 @@ def _parse_keyed_rows(ws, wb_label: str, path: str,
             if not looks_like_footer(body) and body.strip():
                 section = (body.strip(),)
             continue
-        label = _text(ws.cell(r, 1).value).strip()
+        label = _text(ws.cell(r, label_col).value).strip()
         if not label:
             continue
         vals = [_text(ws.cell(r, c.index).value).strip() for c in columns]
@@ -274,14 +294,14 @@ def _parse_keyed_rows(ws, wb_label: str, path: str,
             sheet=ws.title, section_path=section, occurrence_index=occ,
             description=normalize_label(clean), display_description=clean,
             values=values, footnotes=notes,
-            prov=Provenance(wb_label, ws.title, _a1(r, 1), r, 1, label),
+            prov=Provenance(wb_label, ws.title, _a1(r, label_col), r, label_col,
+                            label),
         ))
     return Sheet(name=ws.title, kind="keyed_rows", rows=rows, columns=columns,
                  footnotes=notes)
 
 
-def _parse_stacked_matrix(ws, wb_label: str, path: str,
-                          warnings: list[Warning_]) -> Sheet:
+def _parse_stacked_matrix(ws, ctx: ParseContext) -> Sheet:
     """Color and Trim: several sub-tables stacked vertically.
 
     Each sub-table re-introduces its own header row.  Cells hold **RPO codes**
@@ -290,6 +310,9 @@ def _parse_stacked_matrix(ws, wb_label: str, path: str,
     across these two years the footnote *definitions were permuted*, so label
     text is unstable while the paints are not.  Rows key on the colour/seat code.
     """
+    rule: StackedSheet = ctx.rule
+    wb_label = ctx.label
+    label_col, code_col, seat_col = rule.label_col, rule.code_col, rule.seat_col
     merges = _full_width_merges(ws)
     notes: dict[int, str] = {}
     for body in merges.values():
@@ -297,12 +320,10 @@ def _parse_stacked_matrix(ws, wb_label: str, path: str,
             notes.update(parse_footer(body))
 
     # A header row is one whose first cell names a row-key dimension.
+    keywords = tuple(k.lower() for k in rule.header_keywords)
     header_rows = [
         r for r in range(1, ws.max_row + 1)
-        if _text(ws.cell(r, 1).value).strip().lower() in (
-            "decor level", "exterior solid paint", "exterior paint",
-            "exterior premium paint",
-        )
+        if _text(ws.cell(r, label_col).value).strip().lower() in keywords
     ]
     rows: list[Row] = []
     columns: list[AxisEntry] = []
@@ -310,22 +331,23 @@ def _parse_stacked_matrix(ws, wb_label: str, path: str,
 
     for i, hr in enumerate(header_rows):
         end = header_rows[i + 1] if i + 1 < len(header_rows) else ws.max_row + 1
-        part = _text(ws.cell(hr, 1).value).strip()
-        cols = _columns(ws, hr, 4, footer_notes=notes, refs_on_headers=True)
+        part = _text(ws.cell(hr, label_col).value).strip()
+        cols = _columns(ws, hr, rule.first_axis_col - 1, footer_notes=notes,
+                        refs_on_headers=True, clauses=ctx.clauses)
         columns.extend(cols)
         # A code that occurs once in this sub-table identifies its row, so it can
         # act as the pairing key (paint codes: G42, G4J).  A seat code like A50
         # repeats across every decor level, so it cannot.
         code_counts: dict[str, int] = {}
         for r in range(hr + 1, end):
-            c = _text(ws.cell(r, 3).value).strip()
+            c = _text(ws.cell(r, code_col).value).strip()
             if c:
                 code_counts[c] = code_counts.get(c, 0) + 1
         for r in range(hr + 1, end):
             if r in merges:
                 continue
-            label = _text(ws.cell(r, 1).value).strip()
-            code = _text(ws.cell(r, 3).value).strip()
+            label = _text(ws.cell(r, label_col).value).strip()
+            code = _text(ws.cell(r, code_col).value).strip()
             if not label and not code:
                 continue
             clean, nums = strip_label_refs(label)
@@ -352,20 +374,23 @@ def _parse_stacked_matrix(ws, wb_label: str, path: str,
                 # Only a row-unique code becomes the pairing key.
                 orderable_rpo=code if unique else None,
                 cited_codes=frozenset({code} if code else ()),
-                extra={"code": code, "seat_trim": _text(ws.cell(r, 4).value).strip()},
-                prov=Provenance(wb_label, ws.title, _a1(r, 1), r, 1, label),
+                extra={"code": code,
+                       "seat_trim": _text(ws.cell(r, seat_col).value).strip()},
+                prov=Provenance(wb_label, ws.title, _a1(r, label_col), r, label_col,
+                                label),
             ))
     return Sheet(name=ws.title, kind="stacked_matrix", rows=rows,
                  columns=columns, footnotes=notes)
 
 
-def _parse_grid(ws, wb_label: str, path: str,
-                warnings: list[Warning_]) -> Sheet:
+def _parse_grid(ws, ctx: ParseContext) -> Sheet:
     """Engine Axles / Trailering Specs: multi-level merged headers.
 
     The row key is model plus engine, and the model cell is merged down over
     several engine rows, so it is carried forward.
     """
+    rule: GridSheet = ctx.rule
+    wb_label, warnings = ctx.label, ctx.warnings
     merges = _full_width_merges(ws)
     notes: dict[int, str] = {}
     for body in merges.values():
@@ -373,21 +398,21 @@ def _parse_grid(ws, wb_label: str, path: str,
             notes.update(parse_footer(body))
 
     header_row = next(
-        (r for r in range(1, min(6, ws.max_row + 1))
-         if _text(ws.cell(r, 1).value).strip().lower() == "model"),
+        (r for r in range(1, min(rule.search_rows + 1, ws.max_row + 1))
+         if _text(ws.cell(r, 1).value).strip().lower() == rule.header_label.lower()),
         None,
     )
     if header_row is None:
         warnings.append(Warning_(
             kind="unrecognized_shape", severity="fatal",
-            message=f"{ws.title}: no 'Model' header row found",
+            message=f"{ws.title}: no {rule.header_label.title()!r} header row found",
             where=f"{wb_label}!{ws.title}",
         ))
         return Sheet(name=ws.title, kind="grid", rows=[], columns=[])
 
     # Compose the two header levels so columns stay distinguishable.
     columns: list[AxisEntry] = []
-    for col in range(2, ws.max_column + 1):
+    for col in range(rule.first_axis_col, ws.max_column + 1):
         upper = _text(ws.cell(header_row - 1, col).value).strip()
         lower = _text(ws.cell(header_row, col).value).strip()
         label = " / ".join(p for p in (upper, lower) if p) or f"col{col}"
@@ -431,18 +456,19 @@ def _parse_grid(ws, wb_label: str, path: str,
                  footnotes=notes)
 
 
-def _parse_flat(ws, wb_label: str, path: str,
-                warnings: list[Warning_]) -> Sheet:
+def _parse_flat(ws, ctx: ParseContext) -> Sheet:
     """The All sheet: a per-year ``code -> description`` dictionary.
 
     This is the arbiter for add-versus-relocate: a code present in both years'
     dictionaries cannot be a new feature, whatever the matrix rows suggest.
     """
+    rule: FlatSheet = ctx.rule
+    wb_label = ctx.label
     rows: list[Row] = []
     seen: dict[tuple, int] = {}
-    for r in range(2, ws.max_row + 1):
-        code = _text(ws.cell(r, 1).value).strip()
-        desc = _text(ws.cell(r, 2).value).strip()
+    for r in range(rule.start_row, ws.max_row + 1):
+        code = _text(ws.cell(r, rule.code_col).value).strip()
+        desc = _text(ws.cell(r, rule.desc_col).value).strip()
         if not code:
             continue
         key = (ws.title, code)
@@ -451,8 +477,9 @@ def _parse_flat(ws, wb_label: str, path: str,
         rows.append(Row(
             sheet=ws.title, section_path=(), occurrence_index=occ,
             description=normalize_description(desc), display_description=desc,
-            values={}, orderable_rpo=code, cited_codes=cited_codes(desc),
-            prov=Provenance(wb_label, ws.title, _a1(r, 1), r, 1, code),
+            values={}, orderable_rpo=code, cited_codes=cited_codes(desc, ctx.clauses),
+            prov=Provenance(wb_label, ws.title, _a1(r, rule.code_col), r,
+                            rule.code_col, code),
         ))
     return Sheet(name=ws.title, kind="flat_lookup", rows=rows, columns=[])
 
@@ -545,22 +572,42 @@ def _images(path: str) -> dict[str, list[RowImage]]:
     return out
 
 
-def parse_workbook(path: str, label: str) -> Workbook:
-    """Parse one order-guide workbook into the canonical model."""
+def parse_worksheets(worksheets, path: str, label: str,
+                     rules: RuleSet | None = None) -> tuple[dict[str, Sheet], list[Warning_]]:
+    """Parse worksheet-like objects with the ruleset's sheet registry.
+
+    Anything shaped like an openpyxl worksheet (``title``, ``cell``,
+    ``max_row``, ``max_column``, ``merged_cells``) is accepted, which is what
+    lets another source format reuse these parsers.
+    """
+    rules = rules or DEFAULT_GM
     warnings: list[Warning_] = []
-    wb = load_workbook(path, data_only=True)
     sheets: dict[str, Sheet] = {}
-    for ws in wb.worksheets:
-        kind = kind_of(ws.title)
-        if kind == "unknown":
-            warnings.append(Warning_(
-                kind="unknown_sheet", severity="fatal",
-                message=f"no parser registered for sheet {ws.title!r}",
-                where=f"{label}!{ws.title}",
-            ))
+    for ws in worksheets:
+        rule = rules.sheets.rule_for(ws.title)
+        if rule is None:
+            policy = rules.sheets.unknown_sheet
+            if policy != "skip":
+                warnings.append(Warning_(
+                    kind="unknown_sheet", severity=policy,
+                    message=f"no parser registered for sheet {ws.title!r}",
+                    where=f"{label}!{ws.title}",
+                ))
             continue
-        sheets[ws.title] = _PARSERS[kind](ws, label, path, warnings)
-    wb.close()
+        ctx = ParseContext(label=label, path=path, warnings=warnings,
+                           rules=rules, rule=rule)
+        sheets[ws.title] = _PARSERS[rule.kind](ws, ctx)
+    return sheets, warnings
+
+
+def parse_workbook(path: str, label: str, rules: RuleSet | None = None) -> Workbook:
+    """Parse one order-guide workbook into the canonical model."""
+    # Opened by handle: openpyxl rejects a path without an Excel extension,
+    # and stored uploads are named by content hash.
+    with open(path, "rb") as fh:
+        wb = load_workbook(fh, data_only=True)
+        sheets, warnings = parse_worksheets(wb.worksheets, path, label, rules)
+        wb.close()
 
     for sheet_name, imgs in _images(path).items():
         if sheet_name in sheets:

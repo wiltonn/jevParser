@@ -114,6 +114,12 @@ def annotate(source: str, out: str, events: list[ChangeEvent], *,
     for column, width in zip("ABCDEFGHIJ", (11, 7, 14, 8, 22, 8, 16, 34, 52, 64)):
         log.column_dimensions[column].width = width
 
+    # openpyxl re-embeds images only when Pillow happens to be installed (the
+    # optional ``pdf`` extra brings it), and then not faithfully -- 17 source
+    # photographs came back as 18 parts.  Drop them explicitly so the output
+    # does not depend on what else is installed; see the V1 note above.
+    for sheet in workbook.worksheets:
+        sheet._images = []
     workbook.save(out)
     return {"log_rows": row - 2, "cells_filled": painted}
 

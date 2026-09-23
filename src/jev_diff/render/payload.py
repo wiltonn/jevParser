@@ -21,7 +21,7 @@ from typing import Any
 from ..align.axes import align_axis
 from ..align.pairing import BookAlignment
 from ..classify import ChangeEvent
-from ..judge.run import DEFAULT_LENSES, Judgments
+from ..judge.run import DEFAULT_LENSES, Judgments, Lens
 from ..model.canonical import Row, Sheet, Workbook
 
 #: Sheets rendered by the same table shape.  ``sheets`` dispatches on this
@@ -146,7 +146,8 @@ def _sheet(name: str, old: Sheet, new: Sheet, alignment: BookAlignment,
 
 
 def build(book_a: Workbook, book_b: Workbook, alignment: BookAlignment,
-          events: list[ChangeEvent], judgments: Judgments | None) -> dict[str, Any]:
+          events: list[ChangeEvent], judgments: Judgments | None,
+          lenses: dict[str, Lens] | None = None) -> dict[str, Any]:
     # rid -> eid, so a row in the sheets view can link to the change it caused.
     row_to_event: dict[str, str] = {}
     changed_by_sheet: dict[str, set[str]] = {}
@@ -228,7 +229,7 @@ def build(book_a: Workbook, book_b: Workbook, alignment: BookAlignment,
         "lenses": {
             name: {"weights": lens.weights, "bands": lens.bands,
                    "confidence_floor": lens.confidence_floor}
-            for name, lens in DEFAULT_LENSES.items()
+            for name, lens in (lenses or DEFAULT_LENSES).items()
         },
         "sheets": sheets,
         "events": [_event(e) for e in events],

@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..model.canonical import Row, Workbook
+from ..rules.default_gm import DEFAULT_GM
+from ..rules.model import PairingRules, RuleSet, TierRule
 
 #: Tier 1 -- full identity, including both code columns and the description.
 #: Tier 2 -- unordered code set plus description.
@@ -28,13 +30,13 @@ from ..model.canonical import Row, Workbook
 #:           orderable <-> reference-only column swap, which is a real and
 #:           high-order-risk change that an ordered-pair key misses entirely.
 #: Tier 4 -- description alone, for rows that carry no code at all.
-TIERS: tuple[tuple[int, str, str], ...] = (
-    (1, "exact", "same codes, same description"),
-    (2, "code_set_and_description", "same code set (either column), same description"),
-    (3, "code_set", "same code set (either column), description changed"),
-    (4, "description", "no code in either year, same description"),
-    (5, "unique_description", "description unique in both sheets and unchanged; "
-                              "a code was assigned or removed"),
+#: Tier 5 -- description alone, only where it is unique on both sides.
+#:
+#: The tiers are ruleset data (``rules.PairingRules``): a ruleset may reorder,
+#: disable or relabel them but chooses keys only from :data:`_KEYFUNCS`.  This
+#: is the GM default in its original shape.
+TIERS: tuple[tuple[int, str, str], ...] = tuple(
+    (t.id, t.key, t.reason) for t in DEFAULT_GM.pairing.tiers
 )
 
 
@@ -102,26 +104,24 @@ def _key_unique_desc(row: Row):
 
 
 _KEYFUNCS = {
-    1: _key_exact,
-    2: _key_codeset_desc,
-    3: _key_codeset,
-    4: _key_desc,
-    5: _key_unique_desc,
+    "exact": _key_exact,
+    "code_set_and_description": _key_codeset_desc,
+    "code_set": _key_codeset,
+    "description": _key_desc,
+    "unique_description": _key_unique_desc,
 }
 
-#: Tiers that may only pair a key occurring exactly once on each side.
-_UNIQUE_ONLY = frozenset({5})
 
-
-def _match_tier(pool_a: list[Row], pool_b: list[Row], tier: int,
-                reason: str) -> tuple[list[Pair], list[Row], list[Row]]:
+def _match_tier(pool_a: list[Row], pool_b: list[Row],
+                tier_rule: TierRule) -> tuple[list[Pair], list[Row], list[Row]]:
     """Bucket both pools by the tier's key and pair within each bucket.
 
     Duplicate rows (``SFE`` appears twice in Equipment Groups, in different
     sections) land in the same bucket, so they are paired by section first and
     then by their original order, which keeps a stable one-to-one mapping.
     """
-    keyfunc = _KEYFUNCS[tier]
+    keyfunc = _KEYFUNCS[tier_rule.key]
+    tier, reason = tier_rule.id, tier_rule.reason
     buckets_a: dict[object, list[Row]] = {}
     buckets_b: dict[object, list[Row]] = {}
     for row in pool_a:
@@ -141,7 +141,7 @@ def _match_tier(pool_a: list[Row], pool_b: list[Row], tier: int,
         rows_b = buckets_b.get(key)
         if not rows_b:
             continue
-        if tier in _UNIQUE_ONLY and (len(rows_a) != 1 or len(rows_b) != 1):
+        if tier_rule.unique_only and (len(rows_a) != 1 or len(rows_b) != 1):
             continue
         # Prefer a partner in the same section before falling back to order.
         remaining_b = list(rows_b)
@@ -162,12 +162,15 @@ def _match_tier(pool_a: list[Row], pool_b: list[Row], tier: int,
     return pairs, left_a, left_b
 
 
-def align_sheet(rows_a: list[Row], rows_b: list[Row], sheet: str) -> SheetAlignment:
+def align_sheet(rows_a: list[Row], rows_b: list[Row], sheet: str,
+                pairing: PairingRules | None = None) -> SheetAlignment:
     """Run the deterministic tiers in order over one sheet."""
     result = SheetAlignment(sheet=sheet)
     pool_a, pool_b = list(rows_a), list(rows_b)
-    for tier, _name, reason in TIERS:
-        pairs, pool_a, pool_b = _match_tier(pool_a, pool_b, tier, reason)
+    for tier_rule in (pairing or DEFAULT_GM.pairing).tiers:
+        if not tier_rule.enabled:
+            continue
+        pairs, pool_a, pool_b = _match_tier(pool_a, pool_b, tier_rule)
         result.pairs.extend(pairs)
     result.only_a, result.only_b = pool_a, pool_b
     return result
@@ -199,9 +202,10 @@ class Arbitration:
         return "absent_from_dictionary"
 
 
-def arbitrate(book_a: Workbook, book_b: Workbook) -> Arbitration:
+def arbitrate(book_a: Workbook, book_b: Workbook,
+              dictionary_sheet: str | None = "All") -> Arbitration:
     def dictionary(book: Workbook) -> dict[str, str]:
-        sheet = book.sheets.get("All")
+        sheet = book.sheets.get(dictionary_sheet) if dictionary_sheet else None
         if sheet is None:
             return {}
         return {r.orderable_rpo: r.description for r in sheet.rows if r.orderable_rpo}
@@ -293,17 +297,20 @@ class BookAlignment:
         return [r for r in self.residue if r.disposition == "needs_review"]
 
 
-def align_books(book_a: Workbook, book_b: Workbook) -> BookAlignment:
-    """Align every comparable sheet, then let ``All`` arbitrate the residue."""
-    arb = arbitrate(book_a, book_b)
+def align_books(book_a: Workbook, book_b: Workbook,
+                rules: RuleSet | None = None) -> BookAlignment:
+    """Align every comparable sheet, then let the dictionary arbitrate the residue."""
+    rules = rules or DEFAULT_GM
+    dictionary_sheet = rules.sheets.dictionary_sheet
+    arb = arbitrate(book_a, book_b, dictionary_sheet)
     sheets: dict[str, SheetAlignment] = {}
     for name, sheet_a in book_a.sheets.items():
-        if name == "All":
+        if name == dictionary_sheet:
             continue            # the dictionary is the arbiter, not a diff target
         sheet_b = book_b.sheets.get(name)
         if sheet_b is None:
             continue
-        sheets[name] = align_sheet(sheet_a.rows, sheet_b.rows, name)
+        sheets[name] = align_sheet(sheet_a.rows, sheet_b.rows, name, rules.pairing)
 
     # Let the dictionary dispose of the residue.  Everything except
     # "needs_review" is settled here, with no inference.

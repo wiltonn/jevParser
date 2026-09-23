@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 
 from ..model.canonical import Constraint, FootnoteRef, Legend
+from ..rules.model import ClauseRules
 from .constraints import parse_footnote
 
 # A footnote list item: "1. text" or "1: text", at the start of a line.
@@ -153,13 +154,14 @@ def resolve(
     return tuple(out)
 
 
-def constraints_for(refs: tuple[FootnoteRef, ...]) -> tuple[Constraint, ...]:
+def constraints_for(refs: tuple[FootnoteRef, ...],
+                    clauses: ClauseRules | None = None) -> tuple[Constraint, ...]:
     """Flatten resolved footnotes into deduplicated clause-level constraints."""
     seen: dict[tuple, Constraint] = {}
     for ref in refs:
         if not ref.resolved_text:
             continue
-        for c in parse_footnote(ref.resolved_text):
+        for c in parse_footnote(ref.resolved_text, clauses):
             seen.setdefault(c.key(), c)
     return tuple(seen.values())
 

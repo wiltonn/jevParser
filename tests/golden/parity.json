@@ -1,0 +1,13 @@
+{
+  "alignment": "5aca46bbdd9a79338309aab7ecc34fd847f9fb7e43421728b5c89c4f353fe420",
+  "book_2026": "e0e78a5c34693350eaee6694ed4725d2f98bb94cc549b4ca42c63a55acd715ed",
+  "book_2027": "67c8a991c405cff47ce9390ef09b4875940813f99c16ba5c946ff4b81fbabdf4",
+  "cache_keys": "806b00520aa4f32be51947fbec3d1086ce71c6125b080df28a7b1ca27c23e06c",
+  "cache_lookups": 316,
+  "cache_misses": 0,
+  "event_count": 82,
+  "events": "fb0c5fcae72417fd08549b4ef12ff3b0b2daac41c50592c61cf9cc3108c36ba3",
+  "payload_judged": "e31021308640b312733de0e991199e637e8eea3a5d24043e3964707aacebbd58",
+  "payload_unjudged": "1da2bbe2f78c33f4f2a2ae3614b30a1507afeaaef69708ba5eb68584cb5bfa6c",
+  "report_html": "ad457d3e07d64b62ca524a62e7edecdbddfc5ff715848cf7e06c71599410c2f3"
+}
