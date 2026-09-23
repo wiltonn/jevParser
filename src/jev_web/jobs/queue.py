@@ -61,9 +61,11 @@ def claim(worker_id: str) -> int | None:
         return None
 
 
-def recover_stale() -> int:
+def recover_stale(after: timedelta = STALE_AFTER) -> int:
     """Mark jobs left ``running`` by a process that died as failed."""
-    cutoff = utcnow() - STALE_AFTER
+    from ..db.models import Comparison
+
+    cutoff = utcnow() - after
     with SessionLocal() as session:
         jobs = session.scalars(select(Job).where(Job.status == "running")).all()
         count = 0
@@ -74,6 +76,10 @@ def recover_stale() -> int:
             if beat is None or beat < cutoff:
                 job.status, job.error = "failed", "interrupted: the server stopped mid-run"
                 job.finished_at = utcnow()
+                if job.comparison_id and job.type == "run_comparison":
+                    comparison = session.get(Comparison, job.comparison_id)
+                    comparison.status, comparison.error = "failed", job.error
+                    comparison.finished_at = job.finished_at
                 count += 1
         session.commit()
         return count

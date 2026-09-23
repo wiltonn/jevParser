@@ -430,3 +430,17 @@ def test_writes_are_committed_before_the_response(client):
     brand = ok(client.post(f"/api/oems/{gm['id']}/brands", json={"name": "Hummer"}), 201)
     with SessionLocal() as s:
         assert s.get(Brand, brand["id"]) is not None
+
+
+def test_drain_is_a_noop_with_worker_threads(client):
+    assert ok(client.post("/api/jobs/drain")) == {"mode": "threads", "ran": 0}
+
+
+def test_drain_runs_a_job_in_request_mode(client, comparison, monkeypatch):
+    from jev_web.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "job_mode", "request")
+    job = ok(client.post(f"/api/comparisons/{comparison['id']}/rerun"))
+    assert ok(client.post("/api/jobs/drain")) == {"mode": "request", "ran": 1}
+    assert ok(client.get(f"/api/jobs/{job['id']}"))["status"] == "succeeded"
+    assert ok(client.post("/api/jobs/drain"))["ran"] == 0

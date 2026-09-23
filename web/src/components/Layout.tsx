@@ -1,4 +1,6 @@
+import { useEffect, useRef } from "react";
 import { NavLink, Outlet } from "react-router-dom";
+import { api } from "../lib/api";
 import { useApi, useMe } from "../lib/hooks";
 import type { Doc, Job } from "../lib/types";
 
@@ -16,6 +18,21 @@ export default function Layout() {
   const pending = useApi<Doc[]>(["documents", "pending"], "/documents?status=pending", { refetchInterval: 15000 });
   const active = useApi<Job[]>(["jobs", "active"], "/jobs?status=queued,running", { refetchInterval: 3000 });
   const admin = me.data?.role === "admin";
+
+  // On a serverless host jobs run inside a drain request rather than in worker
+  // threads.  Keep one drain in flight while anything is queued; with worker
+  // threads the server answers "threads" and this stops asking.
+  const draining = useRef(false);
+  const threaded = useRef(false);
+  const queued = active.data?.some((j) => j.status === "queued");
+  useEffect(() => {
+    if (!queued || draining.current || threaded.current) return;
+    draining.current = true;
+    api.post<{ mode: string }>("/jobs/drain")
+      .then((r) => { threaded.current = r.mode === "threads"; })
+      .catch(() => { /* retried on the next poll */ })
+      .finally(() => { draining.current = false; active.refetch(); });
+  }, [queued, active.dataUpdatedAt]);
 
   const toggleTheme = () => {
     const root = document.documentElement;

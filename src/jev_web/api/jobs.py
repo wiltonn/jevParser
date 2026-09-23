@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import current_user, get_session
+from ..config import get_settings
 from ..db.models import Job, User
 from . import serialize as S
 
@@ -20,6 +23,27 @@ def list_jobs(status: str | None = None, type: str | None = None, limit: int = 1
     if type:
         q = q.where(Job.type == type)
     return [S.job(j) for j in session.scalars(q)]
+
+
+#: In request mode a job dies with its request, so anything silent for longer
+#: than the host's request limit was killed there.
+REQUEST_STALE_AFTER = timedelta(minutes=6)
+
+
+@router.post("/jobs/drain")
+def drain(_: User = Depends(current_user)):
+    """Run the oldest queued job to completion inside this request.
+
+    Only in ``job_mode = "request"``; with worker threads it returns at once.
+    The web app calls this while it sees queued jobs.
+    """
+    if get_settings().job_mode != "request":
+        return {"mode": "threads", "ran": 0}
+    from ..jobs.queue import recover_stale
+    from ..jobs.worker import run_pending
+
+    recover_stale(REQUEST_STALE_AFTER)
+    return {"mode": "request", "ran": run_pending(limit=1)}
 
 
 @router.get("/jobs/{job_id}")

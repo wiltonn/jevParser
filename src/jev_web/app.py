@@ -46,7 +46,7 @@ def create_app(settings: Settings | None = None, *, start_workers: bool = True) 
     async def lifespan(_app: FastAPI):
         nonlocal pool
         prepare(settings)
-        if start_workers and settings.workers > 0:
+        if start_workers and settings.job_mode == "threads" and settings.workers > 0:
             from .jobs.worker import WorkerPool
 
             pool = WorkerPool(settings.workers)

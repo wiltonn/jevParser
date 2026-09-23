@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -24,6 +25,15 @@ class Settings(BaseSettings):
     web_dist: Path = Path("web/dist")
     #: Seed the catalog and the GM ruleset on first start.
     auto_seed: bool = True
+    #: ``threads``: worker threads drain the queue inside the process.
+    #: ``request``: no threads; ``POST /api/jobs/drain`` runs a job to
+    #: completion inside that request (serverless hosts that freeze between
+    #: requests).
+    job_mode: Literal["threads", "request"] = "threads"
+    #: Blob storage in Supabase Storage when both are set; local otherwise.
+    supabase_url: str | None = None
+    supabase_service_key: str | None = None
+    supabase_bucket: str = "blobs"
 
     @property
     def db_url(self) -> str:
