@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     supabase_url: str | None = None
     supabase_service_key: str | None = None
     supabase_bucket: str = "blobs"
+    #: Fernet key for secrets stored in the database.  Required where
+    #: ``data_dir`` does not persist (serverless); otherwise a key file is
+    #: generated in ``data_dir``.
+    secret_key: str | None = None
 
     @property
     def db_url(self) -> str:

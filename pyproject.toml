@@ -41,3 +41,6 @@ packages = ["src/jev_diff", "src/jev_web"]
 
 [tool.vercel]
 entrypoint = "api.index:app"
+
+[tool.vercel.scripts]
+build = "cd web && npm ci && npm run build"

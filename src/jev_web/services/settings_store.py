@@ -1,7 +1,8 @@
 """Application settings in the database; secrets encrypted at rest.
 
-The key lives in ``DATA_DIR/secret.key`` -- outside the database, so a copied
-database file does not carry usable API keys with it.
+The key comes from ``JEV_SECRET_KEY``, or else lives in ``DATA_DIR/secret.key``
+-- outside the database either way, so a copied database file does not carry
+usable API keys with it.
 """
 
 from __future__ import annotations
@@ -27,7 +28,10 @@ DEFAULTS: dict[str, tuple[Any, bool]] = {
 
 
 def _fernet() -> Fernet:
-    path = get_settings().secret_key_path
+    settings = get_settings()
+    if settings.secret_key:
+        return Fernet(settings.secret_key.encode())
+    path = settings.secret_key_path
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(Fernet.generate_key())
